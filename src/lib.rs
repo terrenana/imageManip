@@ -1,10 +1,14 @@
 use byteorder::{ByteOrder, LittleEndian};
+use num::clamp;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::prelude::*;
+use std::ops::Mul;
 use std::path::Path;
+use std::usize;
+pub struct Color(u8, u8, u8);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Pixel {
     ColorData(u8, u8, u8),
     Padding,
@@ -13,8 +17,8 @@ impl Pixel {
     fn pixel2d_to_bytes(pixels: Vec<Vec<Pixel>>) -> Vec<u8> {
         let mut result: Vec<u8> = Vec::new();
         for y in 0..pixels[0].len() {
-            for x in 0..pixels.len() {
-                if let Pixel::ColorData(b, g, r) = pixels[x][y] {
+            for column in &pixels {
+                if let Pixel::ColorData(b, g, r) = column[y] {
                     result.push(b);
                     result.push(g);
                     result.push(r);
@@ -26,6 +30,35 @@ impl Pixel {
         result
     }
 }
+
+impl From<&Color> for Pixel {
+    fn from(color: &Color) -> Pixel {
+        let Color(b, g, r) = color;
+        Pixel::ColorData(*b, *g, *r)
+    }
+}
+
+impl From<&Pixel> for Color {
+    fn from(pixel: &Pixel) -> Color {
+        if let Pixel::ColorData(b, g, r) = pixel {
+            Color(*b, *g, *r)
+        } else {
+            Color(0, 0, 0)
+        }
+    }
+}
+
+impl Mul<f64> for Color {
+    type Output = Color;
+    fn mul(self, rhs: f64) -> Self {
+        let Color(b, g, r) = self;
+        let b = clamp(b as f64 * rhs, 0.0, 255.0) as u8;
+        let g = clamp(g as f64 * rhs, 0.0, 255.0) as u8;
+        let r = clamp(r as f64 * rhs, 0.0, 255.0) as u8;
+        Color(b, g, r)
+    }
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 struct Header {
@@ -35,8 +68,8 @@ struct Header {
     reserved2: [u8; 2],
     offset: u32,
     header_size: u32,
-    width: i32,
-    height: i32,
+    width: usize,
+    height: usize,
     color_planes: u16,
     bits_per_pixel: u16,
     compression: u32,
@@ -54,8 +87,8 @@ impl From<Vec<u8>> for Header {
             reserved2: header[8..10].try_into().unwrap(),
             offset: LittleEndian::read_u32(&header[10..14]),
             header_size: LittleEndian::read_u32(&header[14..18]),
-            width: LittleEndian::read_i32(&header[18..22]),
-            height: LittleEndian::read_i32(&header[22..26]),
+            width: LittleEndian::read_i32(&header[18..22]) as usize,
+            height: LittleEndian::read_i32(&header[22..26]) as usize,
             color_planes: LittleEndian::read_u16(&header[26..28]),
             bits_per_pixel: LittleEndian::read_u16(&header[28..30]),
             compression: LittleEndian::read_u32(&header[30..34]),
@@ -90,12 +123,12 @@ impl From<Header> for Vec<u8> {
         bytes[15] = header_size[1];
         bytes[16] = header_size[2];
         bytes[17] = header_size[3];
-        let width: [u8; 4] = header.width.to_le_bytes();
+        let width: [u8; 4] = (header.width as i32).to_le_bytes();
         bytes[18] = width[0];
         bytes[19] = width[1];
         bytes[20] = width[2];
         bytes[21] = width[3];
-        let height: [u8; 4] = header.height.to_le_bytes();
+        let height: [u8; 4] = (header.height as i32).to_le_bytes();
         bytes[22] = height[0];
         bytes[23] = height[1];
         bytes[24] = height[2];
@@ -156,6 +189,7 @@ impl Display for Header {
 struct BmpFile {
     header: Header,
     pixels: Vec<Vec<Pixel>>,
+    padding: usize,
 }
 impl TryFrom<File> for BmpFile {
     type Error = std::io::Error;
@@ -165,7 +199,7 @@ impl TryFrom<File> for BmpFile {
         let header = Header::from(bytes[0..138].to_vec());
         let fpp: usize = header.offset as usize;
         let pixel_array: Vec<u8> = bytes[fpp..].to_vec();
-        let mut padding: i32 = 0;
+        let mut padding: usize = 0;
         if header.width * 3 % 4 != 0 {
             padding = 4 - header.width * 3 % 4
         }
@@ -175,20 +209,24 @@ impl TryFrom<File> for BmpFile {
         }
         let mut pixel_array_index: usize = 2;
         for _ in 0..header.height {
-            for i in 0..header.width {
-                pixels[i as usize].push(Pixel::ColorData(
+            for column in &mut pixels {
+                column.push(Pixel::ColorData(
                     pixel_array[pixel_array_index - 2],
                     pixel_array[pixel_array_index - 1],
                     pixel_array[pixel_array_index],
                 ));
                 pixel_array_index += 3
             }
-            for i in header.width..header.width + padding {
-                pixels[i as usize].push(Pixel::Padding);
+            for column in &mut pixels[header.width..header.width + padding] {
+                column.push(Pixel::Padding);
                 pixel_array_index += 1
             }
         }
-        Ok(BmpFile { header, pixels })
+        Ok(BmpFile {
+            header,
+            pixels,
+            padding,
+        })
     }
 }
 impl From<BmpFile> for Vec<u8> {
@@ -217,15 +255,53 @@ impl Display for BmpFile {
         write!(f, "fileend")
     }
 }
+#[allow(dead_code)]
+impl BmpFile {
+    fn change_pixel(&mut self, x: usize, y: usize, color: Color) {
+        self.pixels[x][y] = Pixel::from(&color);
+    }
+    fn draw_vline(&mut self, pos: usize, thickness: usize, color: Color) {
+        for column in pos - (thickness / 2)..pos + (thickness / 2) {
+            for row in 0..self.header.height {
+                self.pixels[column][row] = Pixel::from(&color);
+            }
+        }
+    }
+    fn draw_hline(&mut self, pos: usize, thickness: usize, color: Color) {
+        for row in pos - (thickness / 2)..pos + (thickness / 2) {
+            for column in 0..self.header.width {
+                self.pixels[column][row] = Pixel::from(&color);
+            }
+        }
+    }
+    fn mirror_horizontal_left(&mut self) {
+        for y in 0..self.header.height {
+            for i in 0..self.header.width / 2 {
+                self.pixels[self.header.width - i - 1][y] = self.pixels[i][y].clone();
+            }
+        }
+    }
+    fn vertical_fade_left(&mut self) {
+        for y in 0..self.header.height {
+            for x in 0..self.header.width {
+                let factor = x as f64 / (self.header.width - 1) as f64;
+                let color = Color::from(&self.pixels[x][y]) * factor;
+                self.pixels[x][y] = Pixel::from(&color);
+            }
+        }
+    }
+}
 
 pub fn test() {
-    let path = Path::new("src/pad1.bmp");
+    let file_name = "bear.bmp";
+    let path_str = &("src/".to_owned() + file_name);
+    let path = Path::new(path_str);
 
     let file = File::open(path).unwrap();
     let mut bmp = BmpFile::try_from(file).unwrap();
-    bmp.pixels[0][0] = Pixel::ColorData(255, 255, 255);
+    bmp.vertical_fade_left();
     let bytes = Vec::from(bmp);
 
-    let mut new_file = File::create("src/manipulated-pad1.bmp").unwrap();
+    let mut new_file = File::create("src/manipulated-".to_owned() + file_name).unwrap();
     new_file.write_all(&bytes).unwrap();
 }
