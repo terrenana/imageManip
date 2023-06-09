@@ -1,11 +1,11 @@
-use byteorder::{ByteOrder, LittleEndian};
+pub(crate) use byteorder::{ByteOrder, LittleEndian};
 use num::clamp;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::prelude::*;
 use std::ops::Mul;
 use std::path::Path;
-use std::usize;
+
 pub struct Color(u8, u8, u8);
 
 #[derive(Debug, Clone)]
@@ -35,6 +35,13 @@ impl From<&Color> for Pixel {
     fn from(color: &Color) -> Pixel {
         let Color(b, g, r) = color;
         Pixel::ColorData(*b, *g, *r)
+    }
+}
+
+impl From<Color> for Pixel {
+    fn from(color: Color) -> Pixel {
+        let Color(b, g, r) = color;
+        Pixel::ColorData(b, g, r)
     }
 }
 
@@ -189,7 +196,6 @@ impl Display for Header {
 struct BmpFile {
     header: Header,
     pixels: Vec<Vec<Pixel>>,
-    padding: usize,
 }
 impl TryFrom<File> for BmpFile {
     type Error = std::io::Error;
@@ -222,11 +228,7 @@ impl TryFrom<File> for BmpFile {
                 pixel_array_index += 1
             }
         }
-        Ok(BmpFile {
-            header,
-            pixels,
-            padding,
-        })
+        Ok(BmpFile { header, pixels })
     }
 }
 impl From<BmpFile> for Vec<u8> {
@@ -258,7 +260,7 @@ impl Display for BmpFile {
 #[allow(dead_code)]
 impl BmpFile {
     fn change_pixel(&mut self, x: usize, y: usize, color: Color) {
-        self.pixels[x][y] = Pixel::from(&color);
+        self.pixels[x][y] = Pixel::from(color);
     }
     fn draw_vline(&mut self, pos: usize, thickness: usize, color: Color) {
         for column in pos - (thickness / 2)..pos + (thickness / 2) {
@@ -286,7 +288,22 @@ impl BmpFile {
             for x in 0..self.header.width {
                 let factor = x as f64 / (self.header.width - 1) as f64;
                 let color = Color::from(&self.pixels[x][y]) * factor;
-                self.pixels[x][y] = Pixel::from(&color);
+                self.pixels[x][y] = Pixel::from(color);
+            }
+        }
+    }
+
+    fn make_red(&mut self) {
+        for y in 0..self.header.height {
+            for x in 0..self.header.width {
+                self.pixels[x][y] = Pixel::from(Color(0, 0, 255));
+            }
+        }
+    }
+    fn make_blue(&mut self) {
+        for y in 0..self.header.height {
+            for x in 0..self.header.width {
+                self.pixels[x][y] = Pixel::from(Color(255, 0, 0));
             }
         }
     }
@@ -299,7 +316,7 @@ pub fn test() {
 
     let file = File::open(path).unwrap();
     let mut bmp = BmpFile::try_from(file).unwrap();
-    bmp.vertical_fade_left();
+    bmp.draw_hline(10, 10, Color(255, 255, 255));
     let bytes = Vec::from(bmp);
 
     let mut new_file = File::create("src/manipulated-".to_owned() + file_name).unwrap();
